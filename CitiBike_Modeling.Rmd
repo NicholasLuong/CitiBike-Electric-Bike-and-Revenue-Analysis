@@ -1,0 +1,582 @@
+---
+title: "Citi Bike E-Bike Mix and Ridership Revenue"
+author: "Lab 2 - Benjamin Heuberger, Phillip Hoang, Nicholas Luong"
+output: 
+  pdf_document:
+    fig_caption: yes
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r, include=FALSE}
+
+library(dplyr)
+library(ggplot2)
+library(ggmap)
+library(tidygeocoder)
+library(stringr)
+library(stargazer)
+library(sandwich)
+library(tidyr)
+library(caret)
+library(tinytex)
+
+```
+
+
+
+```{r, include=FALSE}
+## Data Import
+
+# Citibike Data May and June 2023 
+
+# Folder path
+#folder_path <- "/Users/benjaminheuberger/Desktop/Berkeley_Spring_2023/DATASCI203/lab-2-lab2-benjamin-phillip-nick/data/citibike_data"
+folder_path <- "/Users/nicho/Downloads/Dataset"
+
+# Create an empty list to store DataFrames from each file
+dataframes_list <- list()
+
+# Loop through the files in the folder
+file_list <- list.files(path = folder_path, pattern = "\\citibike-tripdata.csv$", full.names = TRUE)
+for (file_path in file_list) {
+  # Read each CSV file into a DataFrame
+  data <- read.csv(file_path)
+  
+  # Append the DataFrame to the list
+  dataframes_list <- append(dataframes_list, list(data))
+}
+
+# Concatenate all DataFrames into a single DataFrame
+df <- do.call(rbind, dataframes_list)
+
+```
+
+
+
+```{r, include=FALSE, eval=FALSE}
+## Data Wrangling:
+
+# Price per-ride estimation:
+
+# Calculating the ride time based on the start and end time of each ride 
+df$started_at <- as.POSIXct(df$started_at)
+df$ended_at <- as.POSIXct(df$ended_at)
+df$ride_time <- as.numeric(difftime(df$ended_at, df$started_at, units = "mins"))
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Conditions for the ride prices
+condition_member <- df$member_casual == "member"
+condition_ride_time_casual <- df$ride_time < 30
+condition_ride_time_member <- df$ride_time < 45
+condition_electric_bike <- df$rideable_type == "electric_bike"
+
+# Costs
+casual_fee <- 4.50 # applies to non-members to start a ride
+member_fee <- 1.29 # Annual fee divided by the average number of rides/year of members across 2022 -- calculated based on Citibike operating data (see paper notes)
+
+e_rates <- list(member = 0.17, casual = 0.26)
+
+# Define the ride prices based on the conditions
+df$ride_price <- ifelse(
+   # Member, electric bike
+  condition_member & condition_electric_bike, member_fee + (e_rates$member * df$ride_time),    
+  # Member, <45 mins, non-electric bike
+  ifelse(condition_member & condition_ride_time_member, member_fee,  
+         # Member, >=45 mins, non-electric bike
+         ifelse(condition_member, member_fee + ((df$ride_time - 45) * e_rates$member),  
+                # Casual, eletric bike
+                ifelse(condition_electric_bike, casual_fee + (e_rates$casual * df$ride_time),
+                       # Casual, <30 mins, non-electric bike
+                       ifelse(condition_ride_time_casual, casual_fee,
+                              # Casual, >=30 mins, non-electric bike
+                              casual_fee + ((df$ride_time - 30) * e_rates$casual)             
+                       )
+                )
+         )
+  )
+)
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Data Cleaning - Removing Docked Bikes
+
+df <- filter(df, rideable_type != 'docked_bike')
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Check for any NAs
+
+df %>% summarise(across(everything(), ~ sum(is.na(.))))
+
+#Remove Rides where there is no end station - Bikes were probably not returned/stolen
+df[is.na(df$end_lat),]
+df <- df[!is.na(df$end_lat),]
+
+#Checking NA again
+df %>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+
+```{r, eval=FALSE, include = FALSE}
+# Calculate the most common coordinates for each station to get a distinct set of coordinates for each:
+
+# Step 1: Count occurrences of each combination of station ID, latitude, and longitude
+counts_df <- df %>%
+  group_by(start_station_id, start_lat, start_lng) %>%
+  count() 
+
+# Step 2: Sort by station ID and count in descending order
+sorted_counts_df <- counts_df %>%
+  arrange(start_station_id, desc(n))
+
+# Step 3: Keep only the first row (most common set of coordinates) for each station ID
+most_common_coords_df <- sorted_counts_df %>%
+  group_by(start_station_id) %>%
+  slice(1) 
+
+```
+
+
+
+
+```{r, include=FALSE, eval=FALSE}
+## Data Split and Station-Level Data:
+## Getting an exploration set and a confirmation set using a 25-75 split:
+
+## 25% of the sample size
+smp_size <- floor(0.25 * nrow(df))
+
+## Set the seed to make reproducible
+set.seed(12345)
+
+## Scramble the indices to ensure random split while preserving order
+shuffled_indices <- sample(seq_len(nrow(df)))
+
+## Use the first 25% indices for exploration and the remainder for modeling/confirmation
+explore_ind <- shuffled_indices[1:smp_size]
+conf_ind <- shuffled_indices[(smp_size + 1):nrow(df)]
+
+explore_df <- df[explore_ind, ]
+conf_df <- df[conf_ind, ]
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Get a station-level dataframe from the ride-level dataframe:
+
+# Grouped metrics function 
+
+calculate_grouped_metrics <- function(df) {
+  grouped_df <- df %>%
+    group_by(start_station_id) %>%
+    summarize(
+      avg_ride_time = mean(ride_time),
+      avg_ride_price = mean(ride_price),
+      total_rides = n(),
+      electric_bike_percentage = mean(rideable_type == "electric_bike") * 100,
+      member_percentage = mean(member_casual == "member") * 100,
+      days_in_operation = as.integer(difftime(max(ended_at), min(started_at), units = "days"))
+    ) %>%
+    filter(total_rides >= 100)
+  
+  return(grouped_df)
+}
+
+# Grouping metrics for exploration and confirmation sets 
+
+explore_station_df <- calculate_grouped_metrics(explore_df)
+conf_station_df <- calculate_grouped_metrics(conf_df)
+
+# Joining in the coordinate data
+explore_station_df <- left_join(explore_station_df, most_common_coords_df,
+                       by = c("start_station_id"))
+conf_station_df <- left_join(conf_station_df, most_common_coords_df,
+                       by = c("start_station_id"))
+
+# Dropping unneeded column 
+explore_station_df <- select(explore_station_df, -n)
+conf_station_df <- select(conf_station_df, -n)
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Zip Code Data
+
+#folder_path <- "./data/citibike_data"
+# Function to get zip code from coordinates
+get_zipcode <- function(lat, lon) {
+  n <- length(lat)  # Number of rows in the dataframe
+  zipcode <- vector("character", n)  
+  
+  for (i in seq_len(n)) {
+    res <- reverse_geo(lat = lat[i], long = lon[i], method = 'arcgis')
+    address <- res$address
+    zipcode[i] <- sub('.*([0-9]{5}).*', '\\1', address)
+    
+    # Print statement every 500 rows
+    if (i %% 500 == 0) {
+      print(paste("Processed row", i, "out of", n))
+    }
+  }
+  
+  return(zipcode)
+}
+
+# Loading in the zip code file 
+# https://cran.r-project.org/web/packages/zipcodeR/zipcodeR.pdf
+file_path <- file.path(folder_path, "zip_code_db.rda")
+load(file_path)
+
+# merging household income and population density 
+zip_code_db <- zip_code_db %>% 
+  select(zipcode,median_household_income,population_density)
+
+# function for additional data wrangling 
+
+zip_code_processed_df <- function(df, zip_code_db) {
+  # Adding zipcode to the dataframe
+  df <- df %>%
+    mutate(zipcode = get_zipcode(start_lat, start_lng))
+  
+  # Left join with zip_code_db
+  df <- left_join(df, zip_code_db, by = "zipcode")
+  
+  # Drop rows with missing median_household_income
+  df <- drop_na(df, median_household_income)
+  
+  return(df)
+}
+
+explore_station_df <- zip_code_processed_df(explore_station_df,zip_code_db)
+conf_station_df <- zip_code_processed_df(conf_station_df,zip_code_db)
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Bringing in county-level identifier 
+
+file_path <- file.path(folder_path, "New_York_State_ZIP_Codes-County_FIPS_Cross-Reference.csv")
+county_df <- read.csv(file_path)
+
+county_df <- county_df %>% 
+  select(county,zipcode)
+
+# Convert the zipcode column in grouped_df to integer
+explore_station_df$zipcode <- as.integer(explore_station_df$zipcode)
+explore_station_df <- left_join(explore_station_df, county_df, by = c("zipcode")) 
+
+conf_station_df$zipcode <- as.integer(conf_station_df$zipcode)
+conf_station_df <- left_join(conf_station_df, county_df, by = c("zipcode")) 
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Adding in log transformations for key variables for potential use (exploration set to determine):
+
+# Adding in log-transformed variables 
+explore_station_df$log_avg_ride_price <- log(explore_station_df$avg_ride_price)
+explore_station_df$log_area_income <- log(explore_station_df$median_household_income)
+
+conf_station_df$log_avg_ride_price <- log(conf_station_df$avg_ride_price)
+conf_station_df$log_area_income <- log(conf_station_df$median_household_income)
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Create the full file path and save for later reference 
+file_path <- file.path(folder_path, "explore_station_df.rda")
+save(explore_station_df, file = file_path)
+
+file_path <- file.path(folder_path, "conf_station_df.rda")
+save(conf_station_df, file = file_path)
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Exploratory plots and analysis 
+
+# Visualization: Scatter plot 1
+ggplot(explore_station_df, aes(x = avg_ride_price, y = electric_bike_percentage)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Average Revenue Per Day", y = "Electric Bike Percentage", title = "Scatter Plot of Ride Time vs. Electric Bike Percentage")
+
+# Visualization: Scatter plot 2
+ggplot(explore_station_df, aes(x = log_avg_ride_price, y = electric_bike_percentage, color = county)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Log Average Ride Price", y = "Electric Bike Percentage", title = "Scatter Plot of Log Ride Price vs. Electric Bike Percentage") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.5)
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+
+# Visualization: Histogram 1 - Electric bike percentage 
+ggplot(explore_station_df, aes(x = electric_bike_percentage)) +
+  geom_histogram(binwidth = 1.5, color = "black", fill = "lightblue") +
+  labs(x = "Electric Bike Percentage", y = "Frequency", title = "Citibike Stations by Electric Bike Percentage")
+
+# Visualization: Histogram 2 - Log of average ride price 
+ggplot(explore_station_df, aes(x = log_avg_ride_price)) +
+  geom_histogram(binwidth = 0.1, color = "black", fill = "lightblue") +
+  labs(x = "Log of Average Ride Price", y = "Frequency", title = "Citibike Stations by Log of Average Ride Price")
+
+# VisualizationL Histogram 3 - Median Household Income 
+
+ggplot(explore_station_df, aes(x = log_area_income)) +
+  geom_histogram(binwidth = 0.2, color = "black", fill = "lightblue") +
+  labs(x = "Log of Median Household Income", y = "Frequency", title = "Citibike Stations by Log of Median Household Income of Zip Code")
+
+# Visualization Histogram 3 - Urban Density 
+
+ggplot(explore_station_df, aes(x = population_density)) +
+  geom_histogram(bins = 20, color = "black", fill = "lightblue") +
+  labs(x = "Population Density", y = "Frequency", title = "Citibike Stations by Population Density of Zip Code")
+
+# Visualization: Histogram 4 - Member Percentage 
+ggplot(explore_station_df, aes(x = member_percentage)) +
+  geom_histogram(binwidth = 1.5, color = "black", fill = "lightblue") +
+  labs(x = "Member Percentage", y = "Frequency", title = "Citibike Stations by Membership Percentage of Rides")
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Exploratory Regression Models
+
+model_one <- lm(log_avg_ride_price ~ electric_bike_percentage, data = explore_station_df)
+model_two <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides , data = explore_station_df)
+model_three <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides + county + log_area_income + population_density, data = explore_station_df)
+
+rse <- function(model) { 
+  sqrt(diag(vcovHC(model)))
+  }
+
+stargazer(
+  model_one, model_two, model_three, 
+  se = list(rse(model_one), rse(model_two), rse(model_three)),
+  type = 'text')
+
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Testing the Models
+
+```
+
+
+
+## Introduction
+Biking as a means of transportation in New York City has blossomed over the last decade, with mayor Eric Adams recently declaring the trend to be “a sign of true progress for our city.”^[NYC DOT Taking New Steps to Expand Bike Infrastructure and Encourage Safe Operation of E-bikes as Overall Bike Ridership Reaches All-time High. (2023, April 24). NYC.gov. Retrieved August 7, 2023, from https://www.nyc.gov/html/dot/html/pr2023/dot-expand-bike-infrastructure.shtml] Nowhere has this change been more evident than through the city’s bikeshare program, Citi Bike, which allows the users to rent bikes between docking stations scattered across the city. In a decade of operation, Citi Bike has grown its bike fleet from about 6,000 to 30,000, with weekly ridership multiplying from less than 50,000 rides per week to over 870,000 in a recent, record-breaking week.\
+
+A lot of recent growth has been driven by growing demand for electric bikes, which make up 20% of the Citi Bike fleet but account for about half of all rides taken. Recent improvements in e-mobility safety and charging technology have contributed to this growth, and Citi Bike leaders recently stated that they see more of an electric future ahead for the program^[Barron, J. (2023, May 26). Citi Bike, 10 Years Old and Part of New York's Street Life. The New York Times. Retrieved August 6, 2023, from https://www.nytimes.com/2023/05/26/nyregion/citi-bike-10-years-old.htm]. However, it is not fully understood how changes to the mix of the Citi Bike fleet (i.e, electric vs. traditional bikes) at stations affect Citi Bike’s revenue from riders. This is a critical question for the company, which, unlike nearly every large public transit system in the country, does not receive any taxpayer funding and relies on revenue from sponsorship and riders. Our study addresses this empirically using publicly-available data on Citi Bike rides: how does the share of rides initiated from stations on electric bikes relate to average revenue per ride? We generate station-level estimates of ride revenue and electric bike availability, and apply regression models to estimate their association.
+
+## Data and Methodology
+This study uses data from the publicly available Citi Bike system data^[Citi Bike. (n.d.). System Data. Citi Bike. https://citibikenyc.com/system-data]. This data source compiles a list of all rides across Citi Bike’s trip history and includes information about the rideable type (traditional vs. electric), start/end timestamp, starting and ending station (Name, ID, Latitude/Longitude), and whether the rider is a Citi Bike Member or a casual rider. For the scope of this study, we chose to look at data from May to June 2023 which included 7.1 million observations. We split the data into an exploration set comprising 25\% of the observations, which we used to do exploratory analysis and make decisions on features to include in our model, and a confirmation set comprising the other 75\% of the data, which we used for our final regressions.\
+
+For our data cleaning process, we wanted to focus only on traditional vs electric bikes and remove any rides where there is no ending station. To operationalize this metric, we calculated the revenue per ride based on the member type, duration of ride, and rideable type for each ride in our dataset. With that, we aggregated the dataset by the starting station level and calculated the mean ride time, mean ride revenue, total rides, electric bike percentage in that station, member percentage and days in operation. \
+
+The aggregated dataset has 1,782 rows, which represents all the stations in NYC. We chose to look at average revenue per ride because it standardizes how we can look at revenue across stations given the differences in how many electric bikes are available at that station for a particular day. To analyze the percentage, we didn’t have data on the mix of bikes available per station, so we had to assume the mix of rides taken from a starting station for electric bike percentage. Because cost per ride was not directly available in the dataset, we also had to develop a function to calculate the pricing structure for each ride based on rider type, bike type, and ride time, referencing the Citi Bike site^[Citi Bike Membership & Pass Options - NYC. (n.d.). Citi Bike. Retrieved August 6, 2023, from https://citibikenyc.com/pricing]\
+
+We used latitude and longitude of each station to zip codes to join in demographic data based on zip code. Our belief is that fields such as income and population density could affect the willingness of riders to pay to use electric bikes, which are more expensive to the rider. We leveraged the ZipcodeR Library and New York State ZIP Codes-County to get demographic data on population density, fixed-borough effects, and income because these factors could impact how electric bikes are used at certain stations: e.g.,  population density might encourage folks to travel shorter distances and choose not to take an electric bike.\
+
+We wanted to explore the relationship between electric bike mix and the average revenue per ride  with demographic data as control variables. Looking at the figure below, we can see an initial scatterplot that shows a moderately positive linear relationship between the increase in electric bike and ride price. We opted for a logarithmic transformation on the outcome variable because we wanted to understand the percent change in price, and because the clustering of the data at low levels of revenue-per-ride made interpretations with the nominal price more difficult.\
+
+```{r, include=FALSE}
+
+folder_path <- "./data/citibike_data"
+
+file_path <- file.path(folder_path, "conf_station_df.rda")
+load(file_path)
+
+membership_median <- median(conf_station_df$member_percentage)
+
+conf_station_df$rider_type_grouping <- ifelse(conf_station_df$member_percentage > membership_median, "higher membership percentage", "lower membership percentage")
+
+conf_station_df$high_member_percentage <- ifelse(conf_station_df$member_percentage > membership_median, 1, 0)
+
+
+```
+
+```{r, include=TRUE, eval=TRUE, echo = FALSE, fig.align = "center", fig.width=8, fig.height=4, fig.cap = "Scatter Plot of Log Ride Price vs. Electric Bike Percentage"}
+
+# Visualization: Scatter plot Option 1
+
+ggplot(conf_station_df, aes(x = log_avg_ride_price, y = electric_bike_percentage, color = rider_type_grouping)) +
+
+geom_point(size = 3, alpha = 0.7) +
+
+labs(x = "Log Average Ride Price", y = "Electric Bike Percentage", color = "Station average rider type") +
+
+geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.5)
+
+```
+
+This graph reinforces our belief that a linear regression could capture this relationship and so we created a model that would map the following variables against the Ride Price: Electric Bike Percentage, Total Ride, Member Type Percentage, Median Household Income, Population Density, and County. We fit regressions of the form\
+
+$$
+\log(\text{Average Ride Price}) = \beta_0 + \beta_1 \cdot \text{Electric Bike \%} + Z\gamma 
+$$
+
+where $\beta_1$ represents the percent increase in Average Ride Price for each percent increase in Electric Bikes per station, Z is a row vector of additional covariates, and $\gamma$ is a column vector of coefficients.
+
+```{r,  warning=FALSE, include=FALSE, eval=FALSE}
+
+# Visualization: Scatter plot Option 2 
+
+ggplot(conf_station_df, aes(x = log_avg_ride_price, y = electric_bike_percentage, color = county)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Log Average Ride Price", y = "Electric Bike Percentage", title = "Scatter Plot of Log Ride Price vs. Electric Bike Percentage") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.5)
+
+
+# Visualization: Scatter plot Option 3
+
+ggplot(conf_station_df, aes(x = log_avg_ride_price, y = electric_bike_percentage, color = rider_type_grouping)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Log Average Ride Price", y = "Electric Bike Percentage", title = "Scatter Plot of Log Ride Price vs. Electric Bike Percentage", color = "Station average rider type") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.5)
+
+```
+## Results
+```{r, include=FALSE}
+
+model_one <- lm(log_avg_ride_price ~ electric_bike_percentage, data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+
+model_two <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides , data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+
+model_three <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides + county + log_area_income + population_density, data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+summary(model_one)
+summary(model_two)
+summary(model_three)
+```
+
+```{r, include=FALSE}
+
+rse <- function(model) { 
+  sqrt(diag(vcovHC(model)))
+  }
+
+```
+
+```{r, warning=FALSE, echo=FALSE, results='asis'}
+
+stargazer(
+  model_one, model_two, model_three, 
+  se = list(rse(model_one), rse(model_two), rse(model_three)),
+  type = 'latex',
+  header =  FALSE,
+  title = "Estimated Regressions",
+  dep.var.caption  = "Output Variable: natural log of avg price per ride",
+  dep.var.labels   = "",
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  omit = c("county"),
+  omit.stat=c("adj.rsq"), 
+  covariate.labels = c("E-Bike percentage", "Membership percentage", "Total rides",
+  "Log of Area Income", "Population Density"),
+  add.lines = list(
+    c("County fixed effects", "", "","\\checkmark"),
+    "\\hline"
+  ), 
+  digits=3,
+  notes.append = FALSE,
+  notes = "\\parbox[t]{7cm}{$HC_1$ robust standard errors in parentheses. Model 3 includes county fixed effects.}")
+
+```
+Table 1 shows the results of three different regression model specifications. In all of our models, the coefficient on electric bike percentage is positive and highly statistically significant, but modest in magnitude, with point estimates ranging from 0.006 to 0.013. We can interpret this as follows: for every percentage point increase in the portion of a docking station’s rides that are taken on electric bikes, there is a .6\% to 1.3\% increase in the average price per ride. Put into a context, a station that boosted its electric bike availability from an average of around 20\% to 25\%, might see an approximately 5-6\% increase in per-ride revenue. This is a relatively modest change given the average ride price ranges between \$2 and \$3, but given that an average station services over 50 rides per day during the busier months, this marginal added revenue has some tangible practical significance. \
+
+We see that electric bike percentage alone explains very little of the variation in average price (R^2 < 0.01 in model 1), but including other covariates dramatically increases the explanatory power of the model (R^2 of the third model = 0.78). Namely, a 1\% increase in the percentage of a station’s rides taken by members is associated with an approximately 2\% lower average ride price, controlling for other factors. Surprisingly, features that capture the demographic attributes of a station’s surrounding neighborhood—namely median household income and population density—were not statistically significant, but we do include them in our results for theoretical merit. 
+
+
+## Limitations
+The model based on Citi Bike data exhibits both statistical and structural limitations. The statistical limitations are rooted in certain assumptions and model specifications. The key assumptions include metric scale, an adequate sample size (n=1782), and the assumption of Independent and Identically Distributed (IID) data. Although our sample size satisfies the n > 30 rule of thumb for the Central Limit Theorem, complete independence may not hold true, as bikes taken from one station may be docked at other stations at the end of a ride, thereby creating inter-station dependence in bike availability. Geographical and temporal scope may also be influenced by factors like county variations, station distribution, and time of day, impacting station usage patterns.\
+
+To ensure consistent regression estimates, it is essential that the population distribution is represented by a single best linear predictor. This is supported by using the Variance Inflation Factor (VIF) where we were able to demonstrate an absence of collinearity. Using the QQ Plot, we were also able to observe a normal distribution for residuals. The Residual plots and Shapiro tests were utilized to assess homoskedasticity and the variance was found to be consistent across the data. Model specification limitations stem from data quality and availability, as well as sampling bias. Importantly, our key independent variable of interest is the percentage of rides from a station that originate from electric bikes, which we take to be a proxy for electric bike availability at each station. This decision was made because the true bike mix at each station cannot be observed through the available data. However, our operationalized definition of this variable may be more reflective of the heterogeneous preferences of riders rather than the true bike mix at stations. Additional data collection on station bike mix could help better address this issue.  \
+
+The data also lacks comprehensive rider profile data and full visibility into ride costs, leading to the need for assumptions in estimating revenue. The absence of information on riders outside of membership further limits the analysis. While we try to account for some level of variation in rider profile by including a zip-code-level feature related to income, many rides may originate outside of the immediate geographies where riders live. We are unable to observe rider age, wealth, or other attributes that may affect their willingness to ride electric bikes and spend money on Citi Bike.  Structural limitations encompass omitted variable bias, where the limited data might not capture all relevant variables causing bias, and reverse causality, wherein increased revenue from electric bike trips might lead to more electric bike purchases by Citi Bike.
+
+## Conclusion
+Our study examines the relationship between the electric bike mix at stations  on Citi Bike ridership revenue and provides insights into the dynamics of the bikeshare program. The empirical results indicated a positive and statistically significant relationship between electric bike availability and average ride price at the station level. While the model with additional covariates showed an impressive explanatory power, the research faced statistical limitations related to assumptions, model specifications, and data quality. Structural limitations, such as omitted variable bias and reverse causality, may also have influenced the findings. Addressing these limitations in future research will be crucial to enhance the validity and broader applicability of the findings, leading to a deeper understanding of Citi Bike usage patterns and pricing dynamics.
+
+
+```{r, include=FALSE}
+## Testing the Models 
+
+```
+
+```{r, include = FALSE}
+### Residual Plot
+#Checking for colinearity to prove a unique BLP
+#car::vif(model_one)
+car::vif(model_two)
+car::vif(model_three)
+
+plot(model_one,which=1)
+plot(model_two,which=1)
+plot(model_three,which=1)
+
+#Normality
+plot(model_one,which=2)
+plot(model_two,which=2)
+plot(model_three,which=2)
+
+#Normality
+plot(model_one,which=3)
+plot(model_two,which=3)
+plot(model_three,which=3)
+
+shapiro.test(sample(model_one$residuals, size = 300, replace=TRUE))
+shapiro.test(sample(model_two$residuals, size = 300, replace=TRUE))
+shapiro.test(sample(model_three$residuals, size = 300, replace=TRUE))
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+t.test(explore_station_df$log_avg_ride_price, alternative = "greater")
+```
+
+```{r, include=FALSE, eval = FALSE}
+
+#ggplot(x=model_two$fitted.values, y=model_two$residuals) +
+ggplot(model_one, aes(x = .fitted, y = .resid)) +
+  geom_point() + stat_smooth(se = TRUE)
+ggplot(model_two, aes(x = .fitted, y = .resid)) +
+  geom_point() + stat_smooth(se = TRUE)
+ggplot(model_three, aes(x = .fitted, y = .resid)) +
+  geom_point() + stat_smooth(se = TRUE)
+
+
+```
+
+
