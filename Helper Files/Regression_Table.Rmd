@@ -1,0 +1,92 @@
+---
+title: "Lab_2_Regression_Table"
+output: pdf_document
+date: "2023-08-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+
+library(dplyr)
+library(ggplot2)
+library(ggmap)
+library(tidygeocoder)
+library(stringr)
+library(stargazer)
+library(sandwich)
+library(tidyr)
+library(caret)
+
+```
+
+```{r, include=FALSE}
+
+# Folder path
+folder_path <- "/Users/benjaminheuberger/Desktop/Berkeley_Spring_2023/DATASCI203/lab-2-lab2-benjamin-phillip-nick/data/citibike_data"
+
+```
+
+```{r, include=FALSE}
+
+file_path <- file.path(folder_path, "conf_station_df.rda")
+load(file_path)
+
+```
+
+## Final Regression Models
+
+```{r, include=FALSE}
+
+model_one <- lm(log_avg_ride_price ~ electric_bike_percentage, data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+
+model_two <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides , data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+
+model_three <- lm(log_avg_ride_price ~ electric_bike_percentage + member_percentage + total_rides + county + log_area_income + population_density, data = conf_station_df)
+
+```
+
+```{r, include=FALSE}
+
+rse <- function(model) { 
+  sqrt(diag(vcovHC(model)))
+  }
+
+```
+
+```{r, warning=FALSE, echo=FALSE, results='asis'}
+
+stargazer(
+  model_one, model_two, model_three, 
+  se = list(rse(model_one), rse(model_two), rse(model_three)),
+  type = 'latex',
+  header =  FALSE,
+  title = "Estimated Regressions",
+  dep.var.caption  = "Output Variable: natural log of avg price per ride",
+  dep.var.labels   = "",
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  omit = c("county"),
+  omit.stat=c("adj.rsq"), 
+  covariate.labels = c("E-Bike percentage", "Membership percentage", "Total rides",
+  "Log of Area Income", "Population Density"),
+  add.lines = list(
+    c("County fixed effects", "", "","\\checkmark"),
+    "\\hline"
+  ), 
+  digits=3,
+  notes.append = FALSE,
+  notes = "\\parbox[t]{7cm}{$HC_1$ robust standard errors in parentheses.}")
+
+```
+
+## 
