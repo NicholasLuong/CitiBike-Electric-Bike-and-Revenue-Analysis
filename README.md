@@ -1,26 +1,10 @@
-# lab_2
+# CitiBike Electric Bike and Ridership Revenue Project
 
-The final project for MIDS w203. In this lab, students will apply what they have learned about building linear models to produce a report that analyzes a specific research question. 
+This was my final project for UC Berkeley's Statistics for Data Science course. In this project, my team delved into the rich Citibike dataset using R to explore station ridership levels. Our primary focus lies in understanding the influence of electric bikes on revenue generation, examining the varying availability of e-bikes across different stations and their potential impact.
 
-# Assignment Prompt
+Our study explores the impact of electric bikes on Citi Bike's revenue, given the recent surge in  popularity, constituting 20% of the fleet and accounting for half of all rides. Despite this growth, the fleet composition and revenue relationship remains unclear. Understanding this dynamic is crucial as Citi Bike relies solely on revenue from sponsorship and ridership. Using publicly-available ride data, we empirically investigate how the proportion of rides initiated from stations with electric bikes correlates with average revenue per ride, employing regression models for station-level analysis.
 
-The assignment prompt is in `./assignment.Rmd` and rendered in `./assignment.pdf`. 
+This repository is a copy of the private repo my team worked on for the course but have approval to make the code public
 
-# Project Organization
-
-We have created a folder structure to help you organize your work. This is based on [cookiecutter data science](https://drivendata.github.io/cookiecutter-data-science).
-
-
-    ├── LICENSE
-    ├── README.md          <- The top-level README describing the project aims
-    ├── data
-    │   ├── external       <- Data from third party sources.
-    │   ├── interim        <- Intermediate data that has been transformed.
-    │   └── processed      <- The final, canonical data sets for modeling.
-    ├── notebooks          <- .Rmd notebooks. 
-    ├── references         <- Data dictionaries, manuals, and all other explanatory materials.
-    ├── reports            <- Generated analysis as HTML, PDF, LaTeX, etc.
-    └── src                <- Source code for use in this project.
-        └── data           <- Scripts to download or generate data
 
 
